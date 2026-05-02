@@ -2434,6 +2434,8 @@ function wnba_clearAll() {
 
 // ── MLB ──
 
+  const stripAccents = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
 
 function mlb_parseMLB(raw) {
   const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -2453,7 +2455,7 @@ function mlb_parseMLB(raw) {
   const isTeamAbbr  = l => /^[A-Z]{2,3}$/.test(l);
   const isStatJunk  = l => /\b(AB|RBI|OBP|SLG|AVG)\b/.test(l); // stat header leaked into name
   const cleanName   = l => l.replace(/\s+(AB|R\b|H\b|RBI|HR|BB|K\b|AVG|OBP|SLG).*$/,'').trim();
-  const isName      = l => !isStatJunk(l) && /^[A-ZÀ-ÖØ-öø-ÿ][a-zA-ZÀ-ÖØ-öø-ÿ'.]+(\s+[A-Za-zÀ-ÖØ-öø-ÿ'.]+)+$/.test(l) && l.length > 3;
+  const isName      = l => !isStatJunk(l) && /^[A-Z\u00C0-\u024F][a-zA-Z\u00C0-\u024F'.]+(\s+[A-Za-z\u00C0-\u024F'.]+)+$/.test(l.normalize('NFC')) && l.length > 3;
 
   // ── Teams & scores ──────────────────────────────────────────────────────────
   const isNavJunk = l => /^(Skip to|Gamecast|Box Score|Play-by-Play|Videos|Recap|Watch ESPN|ESPN Fantasy|Full Scoreboard|Full Standings|MLB News|All MLB News|Game Information|Game Time|Umpires|Coverage|Attendance|Terms of Use|Privacy|Cookie|ESPN$|NFL$|NBA$|MLB$|NHL$|Soccer$|WNBA$|WWE$|More Sports|Fantasy$|Where to Watch)/i.test(l) || /^\d{1,2}\/\d{1,2}$/.test(l) || /^Final/.test(l) || /^MLB\.TV$/.test(l) || /^\d+-\d+$/.test(l);
@@ -2557,35 +2559,36 @@ function mlb_parseMLB(raw) {
   // Helper: parse player name + optional count from batting note entries
   // Handles: "Freeman", "T. Hernández", "Ohtani 2", "Bichette"
   const parseNotePlayer = str => {
-    const m = str.trim().match(/^([A-Za-zÀ-ÿ'\.]+(?:\s+[A-Za-zÀ-ÿ'\.]+){0,3}?)(?:\s+(\d+))?\s*\(/);
+    const m = str.normalize('NFC').trim().match(/^([A-Za-z\u00C0-\u024F'\.]+(?:\s+[A-Za-z\u00C0-\u024F'\.]+){0,3}?)(?:\s+(\d+))?\s*\(/);
     if (!m) return null;
     return { name: m[1].trim(), count: m[2] ? parseInt(m[2]) : 1 };
   };
 
   for (const rawLine of lines) {
     const line = rawLine.replace(/^\*\s*/, '').trim();
-    if (/^2B[A-Za-zÀ-ÿ]/.test(line)) {
+    if (/^2B[A-Za-z\u00C0-\u024F]/.test(line)) {
       const entries = line.slice(2).split(';');
       for (const entry of entries) {
         const p = parseNotePlayer(entry);
         if (p) result.doubles[p.name] = (result.doubles[p.name]||0) + p.count;
       }
     }
-    if (/^3B[A-Za-zÀ-ÿ]/.test(line)) {
+    if (/^3B[A-Za-z\u00C0-\u024F]/.test(line)) {
       const entries = line.slice(2).split(';');
       for (const entry of entries) {
         const p = parseNotePlayer(entry);
         if (p) result.triples[p.name] = (result.triples[p.name]||0) + p.count;
       }
     }
-    if (/^HR[A-Za-zÀ-ÿ]/.test(line)) {
+    if (/^HR[A-Za-z\u00C0-\u024F]/.test(line)) {
       const entries = line.slice(2).split(';');
       for (const entry of entries) {
         const p = parseNotePlayer(entry);
         if (!p) continue;
         // Count actual HRs this game from inning references in this entry
         const inningRefs = (entry.match(/\d+(?:st|nd|rd|th)\s+inning/gi) || []).length;
-        const hrCount = Math.max(1, inningRefs);
+        const noteCount = p.count || 1; // "Núñez 2" → count=2
+        const hrCount = noteCount > 1 ? noteCount : Math.max(1, inningRefs);
         result.homers[p.name] = (result.homers[p.name]||0) + hrCount;
         const rbiM = entry.match(/(\d+)\s+on/i);
         const inningM = entry.match(/(\d+)(?:st|nd|rd|th)\s+inning/i);
@@ -2593,7 +2596,7 @@ function mlb_parseMLB(raw) {
         hrOrder.push({ name: p.name, rbi: rbiM ? parseInt(rbiM[1]) + 1 : 1, inning });
       }
     }
-    if (/^SB[A-Za-zÀ-ÿ]/.test(line)) {
+    if (/^SB[A-Za-z\u00C0-\u024F]/.test(line)) {
       const entries = line.slice(2).split(';');
       for (const entry of entries) {
         const p = parseNotePlayer(entry);
@@ -2740,9 +2743,18 @@ function mlb_parseMLB(raw) {
   // TB = 1*1B + 2*2B + 3*3B + 4*HR = H + D + 2T + 3HR (no singles calc needed)
   // Singles = max(0, H - HR - 2B - 3B)
   result.batters.forEach(b => {
-    const lastName = b.name.split(' ').slice(-1)[0];
-    const dbl = Object.entries(result.doubles).find(([k]) => b.name.includes(k) || k.includes(lastName) || k === lastName);
-    const tri = Object.entries(result.triples).find(([k]) => b.name.includes(k) || k.includes(lastName) || k === lastName);
+    const lastName = stripAccents(b.name.split(' ').slice(-1)[0].toLowerCase());
+    const bNameN = stripAccents(b.name.toLowerCase());
+    const dbl = Object.entries(result.doubles).find(([k]) => {
+      const kn = stripAccents(k.toLowerCase());
+      const kLast = stripAccents(k.split(' ').slice(-1)[0].toLowerCase());
+      return bNameN.includes(kn) || kn.includes(lastName) || kLast === lastName;
+    });
+    const tri = Object.entries(result.triples).find(([k]) => {
+      const kn = stripAccents(k.toLowerCase());
+      const kLast = stripAccents(k.split(' ').slice(-1)[0].toLowerCase());
+      return bNameN.includes(kn) || kn.includes(lastName) || kLast === lastName;
+    });
     const d = dbl ? dbl[1] : 0;
     const t = tri ? tri[1] : 0;
     b.doubles  = d;
@@ -3045,31 +3057,50 @@ function mlb_renderReport(data) {
     const sfx = new Set(['jr','sr','ii','iii','iv','v']);
     let i = parts.length - 1;
     while (i > 0 && sfx.has(parts[i].toLowerCase().replace(/\./g,''))) i--;
-    return parts[i].toLowerCase();
+    return stripAccents(parts[i].toLowerCase());
   };
 
   if (hasScoringData) {
+    let prevS0 = 0, prevS1 = 0;
     for (const play of plays) {
-      if (!mlb_isHR(play.desc)) continue;
-      const m = play.desc.normalize('NFC').match(/^([A-Za-zÀ-ÿ'.\s]+?)\s+homered/i);
-      if (!m) continue;
+      if (!mlb_isHR(play.desc)) { prevS0 = play.score0; prevS1 = play.score1; continue; }
+      const m = play.desc.normalize('NFC').match(/^([A-Za-z\u00C0-\u024F'.\s]+?)\s+homered/i);
+      if (!m) { prevS0 = play.score0; prevS1 = play.score1; continue; }
       const hrName = m[1].trim().normalize('NFC');
       const hrParts = hrName.split(' ');
 
+      // Determine scoring team from score change (score0=away, score1=home)
+      const awayScored = play.score0 > prevS0;
+      const homeScored = play.score1 > prevS1;
+      const scoringTeam = awayScored ? teams[0] : homeScored ? teams[1] : null;
+
+      // Check if multiple batters share this last name (across both teams)
+      const lastN = hrGetLast(hrName);
+      const sameLastName = batters.filter(b => hrGetLast(b.name) === lastN);
+      const hasNameConflict = sameLastName.length > 1;
+
       const matched = batters.find(b => {
-        if (hrGetLast(b.name) !== hrGetLast(hrName)) return false;
+        if (hrGetLast(b.name) !== lastN) return false;
+        // If two players share the same last name, use team to disambiguate
+        if (hasNameConflict && scoringTeam && b.team !== scoringTeam) return false;
         // Single-word in summary (e.g. "Ohtani") — last name match is enough
         if (hrParts.length === 1) return true;
+        // If hrName is "LastName Suffix" (e.g. "Harris II"), the first part IS the last name
+        const sfx = new Set(['jr','sr','ii','iii','iv','v']);
+        if (hrParts.length >= 2 && hrParts.slice(1).every(p => sfx.has(p.toLowerCase().replace(/\./g,'')))) return true;
         // Multi-word — check first initial agrees
-        const bFirst = b.name.split(' ')[0].replace(/\./g,'').toLowerCase();
-        const hrFirst = hrParts[0].replace(/\./g,'').toLowerCase();
+        const bFirst = stripAccents(b.name.split(' ')[0].replace(/\./g,'').toLowerCase());
+        const hrFirst = stripAccents(hrParts[0].replace(/\./g,'').toLowerCase());
         if (hrFirst.length <= 2 && bFirst.length <= 2) return bFirst[0] === hrFirst[0];
         if (bFirst.length <= 2) return hrFirst.startsWith(bFirst[0]);
         return true;
       });
-      const key = (matched ? matched.name : hrName).normalize('NFC');
+      prevS0 = play.score0; prevS1 = play.score1;
+      const hrMatchedName = (matched ? matched.name : hrName).normalize('NFC');
+      const hrMatchedTeam = matched ? matched.team : '';
+      const key = hrMatchedTeam ? hrMatchedName + '|' + hrMatchedTeam : hrMatchedName;
       hrFromSummary[key] = (hrFromSummary[key] || 0) + 1;
-      if (!firstHRFromSummary) firstHRFromSummary = matched || { name: hrName.normalize('NFC'), team: '', hr: 1 };
+      if (!firstHRFromSummary) firstHRFromSummary = matched || { name: hrMatchedName, team: hrMatchedTeam, hr: 1 };
     }
   }
 
@@ -3078,15 +3109,29 @@ function mlb_renderReport(data) {
     ? batters
         .map(p => {
           // Try exact name match first (NFC normalized)
-          if (hrFromSummary[p.name.normalize('NFC')]) return { ...p, hr: hrFromSummary[p.name.normalize('NFC')] };
+          // Try exact match first, then accent-stripped match
+          const pNFC = p.name.normalize('NFC');
+          // Try composite key (name|team) first — handles same-name players on different teams
+          const compositeKey = pNFC + '|' + (p.team || '');
+          if (hrFromSummary[compositeKey]) return { ...p, hr: hrFromSummary[compositeKey] };
+          // Try exact name key
+          if (hrFromSummary[pNFC]) return { ...p, hr: hrFromSummary[pNFC] };
+          // Try accent-stripped match (handles Núñez vs Nunez)
+          const pStripped = stripAccents(pNFC.toLowerCase());
+          const accentKey = Object.keys(hrFromSummary).find(k => {
+            const kBase = k.split('|')[0]; // strip team suffix if present
+            return stripAccents(kBase.normalize('NFC').toLowerCase()) === pStripped &&
+                   (!k.includes('|') || k.endsWith('|' + (p.team || '')));
+          });
+          if (accentKey) return { ...p, hr: hrFromSummary[accentKey] };
           // Try fallback for unmatched keys (handles "Witt Jr." → "B. Witt Jr.")
           const pLast = hrGetLast(p.name);
           const entry = Object.entries(hrFromSummary).find(([k]) => {
             if (hrGetLast(k) !== pLast) return false;
             const kParts = k.split(' ');
             if (kParts.length === 1) return true;
-            const kFirst = kParts[0].replace(/\./g,'').toLowerCase();
-            const pFirst = p.name.split(' ')[0].replace(/\./g,'').toLowerCase();
+            const kFirst = stripAccents(kParts[0].replace(/\./g,'').toLowerCase());
+            const pFirst = stripAccents(p.name.split(' ')[0].replace(/\./g,'').toLowerCase());
             if (kFirst && pFirst) return kFirst[0] === pFirst[0];
             return true;
           });
@@ -3096,12 +3141,18 @@ function mlb_renderReport(data) {
     : batters.filter(p => {
         // Fallback: last-name match against batting notes homers dict
         if (p.hr > 0) return true;
-        const lastName = p.name.split(' ').slice(-1)[0];
-        return Object.keys(homers).some(k => k === lastName || p.name.includes(k));
+        const lastName = stripAccents(p.name.split(' ').slice(-1)[0].toLowerCase());
+        return Object.keys(homers).some(k => {
+          const kn = stripAccents(k.toLowerCase());
+          return kn === lastName || stripAccents(p.name.toLowerCase()).includes(kn);
+        });
       }).map(p => {
         if (p.hr === 0) {
           const lastName = p.name.split(' ').slice(-1)[0];
-          const entry = Object.entries(homers).find(([k]) => k === lastName || p.name.includes(k));
+          const entry = Object.entries(homers).find(([k]) => {
+              const kn = stripAccents(k.toLowerCase());
+              return kn === lastName || stripAccents(p.name.toLowerCase()).includes(kn);
+            });
           if (entry) return { ...p, hr: entry[1] };
         }
         return p;
@@ -3121,7 +3172,7 @@ function mlb_renderReport(data) {
   let firstHRPlayer = firstHRFromSummary;
   if (!firstHRPlayer && data.firstHR) {
     const lastName = data.firstHR;
-    firstHRPlayer = batters.find(b => b.name.includes(lastName) || lastName.includes(b.name.split(' ').slice(-1)[0]));
+    firstHRPlayer = batters.find(b => stripAccents(b.name.toLowerCase()).includes(stripAccents(lastName.toLowerCase())) || stripAccents(lastName.toLowerCase()).includes(stripAccents(b.name.split(' ').slice(-1)[0].toLowerCase())));
   }
 
   html += `<div class="section sec-hr1st">
@@ -3186,8 +3237,12 @@ function mlb_renderReport(data) {
 
   // 13. Stolen Base
   const sbBatters = batters.map(b => {
-    const lastName = b.name.split(' ').slice(-1)[0];
-    const match = Object.entries(stolenBases).find(([k]) => b.name.includes(k) || k.includes(lastName));
+    const lastName = stripAccents(b.name.split(' ').slice(-1)[0].toLowerCase());
+    const bNameN = stripAccents(b.name.toLowerCase());
+    const match = Object.entries(stolenBases).find(([k]) => {
+      const kn = stripAccents(k.toLowerCase());
+      return bNameN.includes(kn) || kn.includes(lastName);
+    });
     return { ...b, sb: match ? match[1] : 0 };
   });
   html += mlb_renderSection('Stolen Base', 'sec-sb', 'SB', sbBatters,
@@ -3760,7 +3815,7 @@ function nfl_parseNFL(raw) {
     /^\d+-\d+$/.test(l) || /^(Away|Home|, \d+-\d+)/.test(l) ||
     // Known college names only — must be an explicit list, not a regex pattern that matches player names
     /^(Indiana|Notre Dame|Ohio State|Texas Tech|LSU|Alabama|Penn State|Oregon|Clemson|Florida|Georgia|USC|Miami|Utah|Auburn|UCF|Georgia Tech|San Diego St|Arizona St|Texas A&M|Michigan|Michigan State|Wisconsin|Iowa|Minnesota|Northwestern|Illinois|Purdue|Nebraska|Maryland|Rutgers|Oklahoma|Oklahoma State|Texas|Baylor|TCU|Kansas|Kansas State|Iowa State|West Virginia|Duke|North Carolina|NC State|Virginia|Virginia Tech|Pittsburgh|Syracuse|Boston College|Wake Forest|Florida State|Mississippi|Mississippi State|Arkansas|Missouri|Tennessee|Kentucky|South Carolina|Vanderbilt|Auburn|Ole Miss|Stanford|California|UCLA|Washington|Oregon State|Colorado|Arizona|Utah State|Boise State|BYU|Cincinnati|Houston|Memphis|UCF|Tulane|SMU|Hawaii|Nevada|UNLV|Wyoming|Air Force|Fresno State|San Jose State|New Mexico|Colorado State|App State|Troy|Louisiana|South Alabama|Georgia Southern|Navy|Army|Air Force)$/.test(l);
-  const isName = l => !isNavJunk(l) && /^[A-ZÀ-ÖØ-öø-ÿ][a-zA-ZÀ-ÖØ-öø-ÿ'.0-9]+(\s+[A-Za-zÀ-ÖØ-öø-ÿ'.0-9]+)+$/.test(l) && l.length > 3 && !isKeyword(l) && !isSectionHeader(l) && !/^\d/.test(l) && !/^[A-Z\s]+$/.test(l);
+  const isName = l => !isNavJunk(l) && /^[A-Z\u00C0-\u024F][a-zA-Z\u00C0-\u024F'.0-9]+(\s+[A-Za-z\u00C0-\u024F'.0-9]+)+$/.test(l) && l.length > 3 && !isKeyword(l) && !isSectionHeader(l) && !/^\d/.test(l) && !/^[A-Z\s]+$/.test(l);
 
   // ── Scorebox ─────────────────────────────────────────────────────────────
   for (let i = 0; i < lines.length; i++) {
@@ -4584,10 +4639,10 @@ function nhl_parseESPN(raw) {
   // Populate PP/SH points on skaters from scoring plays
   result.scoringPlays.forEach(play => {
     if (play.isPP) {
-      const sc = result.skaters.find(s => s.name.toLowerCase().includes(play.scorer.toLowerCase()) || play.scorer.toLowerCase().includes(s.name.split(' ').slice(-1)[0].toLowerCase()));
+      const sc = result.skaters.find(s => stripAccents(s.name.toLowerCase()).includes(stripAccents(play.scorer.toLowerCase())) || stripAccents(play.scorer.toLowerCase()).includes(stripAccents(s.name.split(' ').slice(-1)[0].toLowerCase())));
       if (sc) sc.ppg = (sc.ppg||0) + 1;
       play.assists.forEach(a => {
-        const as = result.skaters.find(s => s.name.toLowerCase().includes(a.toLowerCase()) || a.toLowerCase().includes(s.name.split(' ').slice(-1)[0].toLowerCase()));
+        const as = result.skaters.find(s => stripAccents(s.name.toLowerCase()).includes(stripAccents(a.toLowerCase())) || stripAccents(a.toLowerCase()).includes(stripAccents(s.name.split(' ').slice(-1)[0].toLowerCase())));
         if (as) as.ppa = (as.ppa||0) + 1;
       });
     }
@@ -4827,7 +4882,7 @@ function nhl_renderReport(data) {
     // Team to score in every period
     [t0, t1].forEach((tm,ti) => {
       const scored = [0,1,2].every(pd => allPeriods[pd].some(p => {
-        const scorer = skaters.find(s => s.name.toLowerCase().includes(p.scorer.toLowerCase()) || p.scorer.toLowerCase().includes(s.name.split(' ').slice(-1)[0].toLowerCase()));
+        const scorer = skaters.find(s => stripAccents(s.name.toLowerCase()).includes(stripAccents(p.scorer.toLowerCase())) || stripAccents(p.scorer.toLowerCase()).includes(stripAccents(s.name.split(' ').slice(-1)[0].toLowerCase())));
         return scorer ? scorer.team === tm : false;
       }));
       gs.push({ label: `${tm} — Score in Every Period`, result: scored ? 'YES' : 'NO', note: null });
@@ -4909,15 +4964,14 @@ function nhl_clearAll() {
 
 
 function normSearch(s) {
-  // Transliterate common accented chars so "jokic" matches "Jokić" etc.
-  return s.toLowerCase()
-    .replace(/[àáâãäå]/g, 'a').replace(/[èéêë]/g, 'e')
-    .replace(/[ìíîï]/g, 'i').replace(/[òóôõöø]/g, 'o')
-    .replace(/[ùúûü]/g, 'u').replace(/[ýÿ]/g, 'y')
-    .replace(/[ñ]/g, 'n').replace(/[ç]/g, 'c')
-    .replace(/[ž]/g, 'z').replace(/[š]/g, 's').replace(/[č]/g, 'c')
-    .replace(/[ð]/g, 'd').replace(/[þ]/g, 'th').replace(/[ß]/g, 'ss')
-    .replace(/[^a-z0-9]/g, '');
+  // Strip diacritics via NFD decomposition, then handle non-decomposable special chars
+  const nfd = s.normalize('NFD').toLowerCase();
+  const stripped = nfd.replace(/[̀-ͯ]/g, ''); // remove combining diacritics
+  return stripped
+    .replace(/[łļ]/g, 'l').replace(/[øœ]/g, 'o').replace(/[ðđ]/g, 'd')
+    .replace(/[þ]/g, 'th').replace(/[ß]/g, 'ss').replace(/[ğ]/g, 'g')
+    .replace(/[şș]/g, 's').replace(/[țţ]/g, 't').replace(/[ı]/g, 'i')
+    .replace(/[æ]/g, 'ae').replace(/[^a-z0-9]/g, '');
 }
 
 function initials(name) {
